@@ -1,7 +1,7 @@
 {
-  "name": "telegram-anime-bot-revamped",
-  "version": "3.0.0",
-  "description": "Bot Telegram anime yang disederhanakan dan dipercantik.",
+  "name": "bot",
+  "version": "19.0.0",
+  "description": "Bot Telegram paling legendaris dengan semua fitur dalam satu file.",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
@@ -9,7 +9,8 @@
   "dependencies": {
     "@google/generative-ai": "^0.14.1",
     "axios": "^1.7.2",
-    "telegraf": "^4.16.3"
+    "cheerio": "^1.0.0-rc.12",
+    "telegraf": "^4.16.3",
+    "ytdl-core": "^4.11.5"
   }
 }
-

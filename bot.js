@@ -3,330 +3,550 @@ const axios = require("axios");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const fs = require("fs").promises;
 const path = require("path");
+const ytdl = require('ytdl-core');
+const cheerio = require('cheerio');
+const { exec } = require('child_process');
 
-// --- ⚙️ KONFIGURASI UTAMA ⚙️ --- //
+// --- ⚙️ PUSAT KONFIGURASI & KUNCI API ⚙️ --- //
 const BOT_TOKEN = process.env.BOT_TOKEN || '8021784210:AAFf6UO4T9lHP66VySh5GDTh0qdv5mjZQG0';
-const WEATHER_API_KEY = process.env.WEATHER_API_KEY || 'b1fef27991b8b70b537697eefa81044a';
+const WEATHER_API_KEY = process.env.WEATHER_API_KEY || '060a6bcfa19809c2cd4d97a212b19273';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyAuKMjIfDVFm4Y5LN8YNoE8G4f4eBVZHHM';
+// PENTING: Masukkan API Key dari Google Cloud untuk YouTube di sini!
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'MASUKKAN_YOUTUBE_API_KEY_DISINI'; 
+const HITORI_API_KEY = 'htrkey-77eb83c0eeb39d40';
 
-// --- 🗂️ Database & Lokasi File 🗂️ --- //
+// --- 🖼️ DATA & LOKASI FILE 🖼️ --- //
+const menuImages = ['https://i.waifu.pics/dPXxQqE.png', 'https://i.waifu.pics/3pFDfnw.png', 'https://i.waifu.pics/3pFDfnw.png'];
 const DATA_DIR = path.join(__dirname, "data");
-const USERS_FILE = path.join(DATA_DIR, "users.json");
-const PINS_FILE = path.join(DATA_DIR, "pins.json");
-const CONVERSATIONS_DIR = path.join(DATA_DIR, "conversations"); // Folder untuk menyimpan chat history
+const CONVERSATIONS_DIR = path.join(DATA_DIR, "conversations");
+const TEMP_DIR = path.join(__dirname, 'temp');
 
-// --- 🧠 Class Database (dengan fungsi AI history) 🧠 --- //
-class Database {
-    static async loadData(filePath) {
-        try {
-            const data = await fs.readFile(filePath, "utf8");
-            return JSON.parse(data);
-        } catch (error) {
-            if (error.code === "ENOENT") return {};
-            throw error;
-        }
-    }
-
-    static async saveData(filePath, data) {
-        await fs.mkdir(path.dirname(filePath), { recursive: true });
-        await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
-    }
-
-    static async init() {
-        await fs.mkdir(CONVERSATIONS_DIR, { recursive: true }); // Pastikan folder conversation ada
-        if (!(await fs.access(USERS_FILE).then(() => true).catch(() => false))) await this.saveData(USERS_FILE, {});
-        if (!(await fs.access(PINS_FILE).then(() => true).catch(() => false))) await this.saveData(PINS_FILE, {});
-    }
-
-    static async addOrUpdateUser(userId, username, firstName) {
-        const users = await this.loadData(USERS_FILE);
-        users[userId] = { username: username || null, firstName: firstName || 'User', lastActivity: new Date().toISOString() };
-        await this.saveData(USERS_FILE, users);
-    }
-
-    static async addPin(userId, imageUrl, animeName) {
-        const pins = await this.loadData(PINS_FILE);
-        if (!pins[userId]) pins[userId] = [];
-        const newPin = { id: Date.now().toString(), imageUrl, animeName, timestamp: new Date().toISOString() };
-        pins[userId].push(newPin);
-        await this.saveData(PINS_FILE, pins);
-        return newPin.id;
-    }
-    
-    // Fungsi untuk memuat history chat AI
-    static async loadConversation(userId) {
-        const filePath = path.join(CONVERSATIONS_DIR, `${userId}.json`);
-        try {
-            const data = await fs.readFile(filePath, 'utf8');
-            return JSON.parse(data);
-        } catch (error) {
-            return []; // Jika file tidak ada, mulai dengan history kosong
-        }
-    }
-
-    // Fungsi untuk menyimpan history chat AI
-    static async saveConversation(userId, history) {
-        const filePath = path.join(CONVERSATIONS_DIR, `${userId}.json`);
-        await this.saveData(filePath, history);
+// --- 🧠 FUNGSI DATABASE (Untuk Memori AI) 🧠 --- //
+async function initDatabase() {
+    try {
+        await fs.mkdir(CONVERSATIONS_DIR, { recursive: true });
+        await fs.mkdir(TEMP_DIR, { recursive: true });
+    } catch (error) {
+        console.error("Gagal membuat folder data/temp:", error);
     }
 }
+async function loadConversation(userId) {
+    const filePath = path.join(CONVERSATIONS_DIR, `${userId}.json`);
+    try { 
+        const data = await fs.readFile(filePath, 'utf8');
+        return JSON.parse(data); 
+    } catch (error) { 
+        return []; 
+    }
+}
+async function saveConversation(userId, history) {
+    const filePath = path.join(CONVERSATIONS_DIR, `${userId}.json`);
+    await fs.writeFile(filePath, JSON.stringify(history, null, 2), 'utf8');
+}
 
-// --- 🤖 Inisialisasi Bot & AI 🤖 --- //
+// --- 🤖 INISIALISASI BOT & API HELPER 🤖 --- //
 const bot = new Telegraf(BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const aiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const hitoriApi = axios.create({ baseURL: 'https://api.hitori.pw', params: { 'apikey': HITORI_API_KEY } });
+const someRandomApi = axios.create({ baseURL: 'https://some-random-api.com' });
 
-// --- 🎨 Helper & Data 🎨 --- //
-const getRandomItem = (arr) => arr[Math.floor(Math.random() * arr.length)];
-const sfwCategories = ['waifu', 'neko', 'shinobu', 'megumin', 'bully', 'cuddle', 'cry', 'hug', 'awoo', 'kiss', 'lick', 'pat', 'smug', 'bonk', 'yeet', 'blush', 'smile', 'wave', 'highfive', 'handhold', 'nom', 'bite', 'glomp', 'slap', 'kill', 'kick', 'happy', 'wink', 'poke', 'dance', 'cringe'];
-const nsfwCategories = ["waifu", "neko", "trap", "blowjob"];
 
-// --- 🌟 PERINTAH UTAMA 🌟 --- //
+// --- 🌟 MENU UTAMA (/start & /help) 🌟 --- //
+const mainMenuMessage = `
+<pre>
+┌─⠀✨ *Selamat Datang di Bot Legendaris!*
+│
+│ Bot serbaguna dengan puluhan fitur canggih.
+│ Dibangun dari "harta karun" yang kamu kumpulkan.
+└─────────────────
 
-// /start
-bot.start(async (ctx) => {
-    const { id, username, first_name } = ctx.from;
-    await Database.addOrUpdateUser(id.toString(), username, first_name);
-    const welcomeMessage = `
-🌸 *Selamat Datang, ${first_name}!* 🌸
+┌─⠀📥 *MENU DOWNLOADER*
+│ /tiktok &lt;link&gt;  - Download video TikTok
+│ /spotifydl &lt;link&gt; - Download lagu Spotify
+│ /mediafire &lt;link&gt; - Download dari MediaFire
+│ /play &lt;judul&gt;   - Putar lagu dari YouTube
+└─────────────────
 
-Saya adalah Bot Anime yang siap membantu Anda.
-Ketik /help untuk melihat semua perintah yang tersedia.
+┌─⠀🎨 *MENU AI & KREATIF*
+│ /imagine &lt;teks&gt; - Buat gambar dari AI
+│ /remini         - Tingkatkan kualitas foto
+│ /qc &lt;teks&gt;      - Buat stiker chat palsu
+│ /smeme &lt;a|b&gt;    - Buat stiker meme
+│ /wasted         - Buat meme GTA Wasted
+│ /triggered      - Buat GIF Triggered
+└─────────────────
 
-Selamat menikmati! ✨
-    `;
-    await ctx.replyWithPhoto('https://i.waifu.pics/dPXxQqE.png', {
-        caption: welcomeMessage,
-        parse_mode: 'Markdown'
-    });
+┌─⠀🎭 *MENU STIKER & FUN*
+│ /sticker        - Ubah gambar jadi stiker
+│ /emojimix &lt;a+b&gt; - Gabungkan 2 emoji
+│ /brat &lt;teks&gt;    - Buat stiker tulisan
+│ /bratvid &lt;teks&gt; - Buat stiker video tulisan
+│ /dadu           - Lempar dadu
+│ /cekmati &lt;nama&gt; - Cek "nasib"
+└─────────────────
+
+┌─⠀🔍 *MENU PENCARIAN & INFO*
+│ /ai &lt;pesan&gt;     - Ngobrol dengan AI
+│ /reset          - Hapus memori AI
+│ /stalk &lt;link&gt;   - Cek followers medsos
+│ /ghstalk &lt;user&gt; - Cek profil GitHub
+│ /spotify &lt;lagu&gt; - Cari info lagu Spotify
+│ /urban &lt;kata&gt;   - Cari arti kata gaul
+│ /tenor &lt;gif&gt;    - Cari GIF
+│ /npm &lt;paket&gt;    - Cari info paket NPM
+│ /ssweb &lt;link&gt;   - Screenshot website
+│ /cuaca &lt;kota&gt;   - Info cuaca
+└─────────────────
+
+┌─⠀✍️ *MENU TEKS & KONTEN*
+│ /quotes         - Kutipan acak
+│ /motivasi       - Kata-kata motivasi
+│ /bucin          - Kata-kata bucin
+│ /style &lt;teks&gt;   - Buat tulisan gaul
+│ /kopi           - Kirim gambar kopi
+│ /meme           - Kirim meme acak
+│ /help           - Tampilkan menu ini
+└─────────────────
+</pre>
+`;
+
+const showMainMenu = async (ctx) => {
+    try {
+        const randomImage = menuImages[Math.floor(Math.random() * menuImages.length)];
+        await ctx.replyWithPhoto(randomImage, { caption: mainMenuMessage, parse_mode: 'HTML' });
+    } catch (error) {
+        await ctx.replyWithHTML(mainMenuMessage);
+    }
+};
+bot.start(showMainMenu);
+bot.help(showMainMenu);
+
+
+// --- 📥 IMPLEMENTASI FITUR DOWNLOADER 📥 --- //
+bot.command('tiktok', async (ctx) => {
+    const link = ctx.message.text.split(' ')[1];
+    if (!link || !link.includes('tiktok.com')) return ctx.reply('❓ Penggunaan: `/tiktok <link video tiktok>`');
+    const waitingMessage = await ctx.reply('📥 Mengunduh video TikTok...');
+    try {
+        const { data } = await hitoriApi.get('/download/tiktok', { params: { url: link } });
+        await ctx.replyWithVideo(data.data.video, { caption: data.data.caption || 'Done!' });
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal mengunduh video.').catch(() => {});
+    }
 });
 
-// /help
-bot.help((ctx) => {
-    const helpMessage = `
-*🤖 Bantuan Bot Anime 🤖*
-
-Berikut adalah daftar perintah yang bisa Anda gunakan:
-
-*Gambar & Anime:*
-• \`/random\` - Mengirim gambar anime acak.
-• \`/nsfw\` - Gambar anime 18+ (hanya di private chat).
-• \`/search <nama>\` - Mencari info detail sebuah anime.
-• \`/pin <link_gambar>\` - Menyimpan gambar ke koleksi Anda.
-• \`/pins\` - Menampilkan koleksi gambar yang Anda simpan.
-
-*AI & Hiburan:*
-• \`/ai <pesan>\` - Ngobrol dengan AI Gemini (punya memori!).
-• \`/reset\` - Menghapus memori percakapan dengan AI.
-• \`/meme\` - Mengirim meme acak dari internet.
-• \`/quotes\` - Kutipan inspiratif.
-• \`/jokes\` - Lelucon receh.
-
-*Info & Utilitas:*
-• \`/berita\` - Berita terbaru seputar teknologi.
-• \`/cuaca <kota>\` - Informasi cuaca terkini.
-• \`/help\` - Menampilkan pesan bantuan ini.
-    `;
-    ctx.reply(helpMessage, { parse_mode: 'Markdown' });
+bot.command('spotifydl', async (ctx) => {
+    const link = ctx.message.text.split(' ')[1];
+    if (!link || !link.includes('spotify.com')) return ctx.reply('❓ Penggunaan: `/spotifydl <link lagu spotify>`');
+    const waitingMessage = await ctx.reply('📥 Mengunduh lagu Spotify...');
+    try {
+        const { data } = await hitoriApi.get('/download/spotify', { params: { url: link } });
+        await ctx.replyWithAudio({ url: data.data.url, filename: `${data.data.title}.mp3` }, {
+            caption: `🎶 *${data.data.title}*\n🎤 Artis: ${data.data.artist}`,
+            parse_mode: 'Markdown'
+        });
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal mengunduh lagu.').catch(() => {});
+    }
 });
 
-// /ai (SEKARANG DENGAN MEMORI)
+bot.command('mediafire', async (ctx) => {
+    const link = ctx.message.text.split(' ')[1];
+    if (!link || !link.includes('mediafire.com')) return ctx.reply('❓ Penggunaan: `/mediafire <link mediafire>`');
+    const waitingMessage = await ctx.reply('📥 Mengunduh file dari MediaFire...');
+    try {
+        const { data } = await hitoriApi.get('/download/mediafire', { params: { url: link } });
+        await ctx.replyWithDocument({ url: data.data.url, filename: data.data.filename }, {
+            caption: `*${data.data.filename}* (${data.data.size})`,
+            parse_mode: 'Markdown'
+        });
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal mengunduh file.').catch(() => {});
+    }
+});
+
+bot.command('play', async (ctx) => {
+    if (YOUTUBE_API_KEY === 'MASUKKAN_YOUTUBE_API_KEY_DISINI') return ctx.reply('❌ Fitur musik belum aktif. Silakan atur YOUTUBE_API_KEY.');
+    const query = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!query) return ctx.reply('❓ Penggunaan: `/play <judul lagu>`');
+    const waitingMessage = await ctx.reply(`🔍 Mencari lagu...`);
+    try {
+        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&type=video&key=${YOUTUBE_API_KEY}`;
+        const { data } = await axios.get(searchUrl);
+        if (!data.items.length) return ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Lagu tidak ditemukan.');
+        const video = data.items[0];
+        const videoId = video.id.videoId;
+        const title = video.snippet.title;
+        await ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, `✅ Lagu ditemukan!\n*${title}*\n\nMengunduh...`, { parse_mode: 'Markdown' });
+        const audioStream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, { filter: 'audioonly', quality: 'highestaudio' });
+        await ctx.replyWithAudio({ source: audioStream, filename: `${title}.mp3` }, { caption: `🎶 *${title}*`, parse_mode: 'Markdown' });
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Terjadi kesalahan saat memproses lagu.').catch(() => {});
+    }
+});
+
+
+// --- 🎨 IMPLEMENTASI FITUR AI & KREATIF 🎨 --- //
+bot.command('imagine', async (ctx) => {
+    const query = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!query) return ctx.reply('❓ Penggunaan: `/imagine <deskripsi gambar>`');
+    const waitingMessage = await ctx.reply('🎨 AI sedang melukis...');
+    try {
+        const { data } = await hitoriApi.get('/ai/stablediffusion', { params: { prompt: query } });
+        await ctx.replyWithPhoto(data.data.url, { caption: `*Prompt:* ${query}`, parse_mode: 'Markdown' });
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal membuat gambar.').catch(() => {});
+    }
+});
+
+bot.command('remini', async (ctx) => {
+    if (!ctx.message.reply_to_message || !ctx.message.reply_to_message.photo) return ctx.reply('❓ Reply ke sebuah foto dengan perintah `/remini`');
+    const waitingMessage = await ctx.reply('✨ Meningkatkan kualitas gambar...');
+    try {
+        const fileId = ctx.message.reply_to_message.photo.pop().file_id;
+        const fileLink = await ctx.telegram.getFileLink(fileId);
+        const { data } = await hitoriApi.get('/tools/remini', { params: { url: fileLink.href } });
+        await ctx.replyWithDocument({ url: data.data.url, filename: 'remini-hd.jpg' });
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal meningkatkan kualitas.').catch(() => {});
+    }
+});
+
+bot.command('qc', async (ctx) => {
+    const text = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!text) return ctx.reply('❓ Penggunaan: `/qc <teks untuk quote>`');
+    const waitingMessage = await ctx.reply('✍️ Membuat quote...');
+    try {
+        const userId = ctx.from.id;
+        const name = ctx.from.first_name;
+        let pfpUrl = 'https://i.pinimg.com/564x/8a/e9/e9/8ae9e92fa4e69967aa61bf2bda967b7b.jpg';
+        try {
+            const pfp = await ctx.telegram.getUserProfilePhotos(userId, 0, 1);
+            if (pfp.total_count > 0) {
+                const fileId = pfp.photos[0][0].file_id;
+                pfpUrl = (await ctx.telegram.getFileLink(fileId)).href;
+            }
+        } catch (e) {}
+        const { data } = await hitoriApi.get('/tools/qc', { params: { text, name, avatar: pfpUrl } });
+        await ctx.replyWithSticker(data.data.url);
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal membuat quote.').catch(() => {});
+    }
+});
+
+
+bot.command('smeme', async (ctx) => {
+    if (!ctx.message.reply_to_message || !ctx.message.reply_to_message.photo) return ctx.reply('❓ Reply ke sebuah foto dengan perintah `/smeme teks atas|teks bawah`');
+    const text = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!text || !text.includes('|')) return ctx.reply('❓ Format salah. Contoh: `/smeme teks atas|teks bawah`');
+    const [topText, bottomText] = text.split('|');
+    const waitingMessage = await ctx.reply('😂 Membuat meme...');
+    try {
+        const fileId = ctx.message.reply_to_message.photo.pop().file_id;
+        const fileLink = await ctx.telegram.getFileLink(fileId);
+        const apiUrl = `https://api.memegen.link/images/custom/${encodeURIComponent(topText)}/${encodeURIComponent(bottomText)}.png?background=${fileLink.href}`;
+        await ctx.replyWithSticker(apiUrl);
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal membuat meme.').catch(() => {});
+    }
+});
+
+const applyCanvas = async (ctx, canvasType) => {
+    if (!ctx.message.reply_to_message || !ctx.message.reply_to_message.photo) return ctx.reply(`❓ Reply ke sebuah foto dengan perintah \`/${canvasType}\``);
+    const waitingMessage = await ctx.reply('🎨 Menerapkan efek...');
+    try {
+        const fileId = ctx.message.reply_to_message.photo.pop().file_id;
+        const fileLink = await ctx.telegram.getFileLink(fileId);
+        const { data } = await someRandomApi.get(`/canvas/filters/${canvasType}`, { params: { avatar: fileLink.href }, responseType: 'arraybuffer' });
+        if (canvasType === 'triggered') {
+            await ctx.replyWithAnimation({ source: data });
+        } else {
+            await ctx.replyWithPhoto({ source: data });
+        }
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal menerapkan efek.').catch(() => {});
+    }
+};
+bot.command('wasted', (ctx) => applyCanvas(ctx, 'wasted'));
+bot.command('triggered', (ctx) => applyCanvas(ctx, 'triggered'));
+
+
+// --- 🎭 IMPLEMENTASI FITUR STIKER & FUN 🎭 --- //
+bot.command('sticker', async (ctx) => {
+    if (!ctx.message.reply_to_message || (!ctx.message.reply_to_message.photo && !ctx.message.reply_to_message.sticker)) {
+        return ctx.reply('❓ Reply ke sebuah foto/stiker dengan perintah `/sticker`');
+    }
+    const waitingMessage = await ctx.reply('✨ Membuat stiker...');
+    try {
+        const fileId = ctx.message.reply_to_message.photo ? ctx.message.reply_to_message.photo.pop().file_id : ctx.message.reply_to_message.sticker.file_id;
+        await ctx.replyWithSticker(fileId);
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal membuat stiker.').catch(() => {});
+    }
+});
+
+bot.command('emojimix', async (ctx) => {
+    const text = ctx.message.text.split(' ')[1];
+    if (!text || !text.includes('+')) return ctx.reply('❓ Penggunaan: `/emojimix 😀+👻`');
+    const [emoji1, emoji2] = text.split('+');
+    const waitingMessage = await ctx.reply('🧑‍🍳 Mencampur emoji...');
+    try {
+        const { data } = await hitoriApi.get('/tools/emojimix', { params: { emoji1, emoji2 } });
+        await ctx.replyWithSticker(data.data.url);
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal mencampur emoji.').catch(() => {});
+    }
+});
+
+bot.command('brat', async (ctx) => {
+    const text = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!text) return ctx.reply('❓ Penggunaan: `/brat <teks kamu>`');
+    try {
+        await ctx.replyWithSticker(`https://aqul-brat.hf.space/?text=${encodeURIComponent(text)}`);
+    } catch (error) {
+        ctx.reply('❌ Gagal membuat stiker brat.');
+    }
+});
+
+bot.command('bratvid', async (ctx) => {
+    const text = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!text) return ctx.reply('❓ Penggunaan: `/bratvid <teks kamu>`');
+    const waitingMessage = await ctx.reply('🎥 Membuat video tulisan...');
+    const tempId = ctx.from.id + Date.now();
+    try {
+        const words = text.split(' ');
+        const frames = [];
+        for (let i = 0; i < words.length; i++) {
+            const currentText = words.slice(0, i + 1).join(' ');
+            const response = await axios.get(`https://aqul-brat.hf.space/?text=${encodeURIComponent(currentText)}`, { responseType: 'arraybuffer' });
+            const framePath = path.join(TEMP_DIR, `frame_${tempId}_${i}.png`);
+            await fs.writeFile(framePath, response.data);
+            frames.push(framePath);
+        }
+        const fileListPath = path.join(TEMP_DIR, `files_${tempId}.txt`);
+        const fileListContent = frames.map(f => `file '${f.replace(/\\/g, '/')}'\nduration 0.5`).join('\n');
+        await fs.writeFile(fileListPath, fileListContent);
+        const outputPath = path.join(TEMP_DIR, `output_${tempId}.mp4`);
+        exec(`ffmpeg -y -f concat -safe 0 -i "${fileListPath}" -vsync vfr -pix_fmt yuv420p "${outputPath}"`, async (error) => {
+            if (error) {
+                console.error("FFMPEG Error:", error);
+                ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal membuat video. Pastikan FFmpeg terinstall.').catch(() => {});
+                return;
+            }
+            await ctx.replyWithAnimation({ source: outputPath });
+            ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+            // Cleanup
+            await Promise.all([...frames.map(f => fs.unlink(f)), fs.unlink(fileListPath), fs.unlink(outputPath)]).catch(console.error);
+        });
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal memproses video.').catch(() => {});
+    }
+});
+
+bot.command('dadu', (ctx) => ctx.replyWithSticker(`https://www.random.org/dice/dice${Math.floor(Math.random() * 6) + 1}.png`));
+
+bot.command('cekmati', async (ctx) => {
+    const name = ctx.message.text.split(' ').slice(1).join(' ') || ctx.from.first_name;
+    try {
+        const { data } = await axios.get(`https://api.agify.io/?name=${name}`);
+        ctx.reply(`*Nama:* ${name}\n*Prediksi Umur Kematian:* ${data.age || (Math.floor(Math.random() * 40) + 50)} tahun.\n\n_Cepatlah bertaubat, karena ajal tidak menunggu taubatmu._`, { parse_mode: 'Markdown' });
+    } catch (error) {
+        ctx.reply('❌ Gagal meramal nasib.');
+    }
+});
+
+
+// --- 🔍 IMPLEMENTASI FITUR PENCARIAN & INFO 🔍 --- //
 bot.command("ai", async (ctx) => {
     const userId = ctx.from.id.toString();
     const userMessage = ctx.message.text.split(' ').slice(1).join(' ');
     if (!userMessage) return ctx.reply("❓ Penggunaan: `/ai <pertanyaan Anda>`");
-
     try {
         await ctx.replyWithChatAction("typing");
-
-        // 1. Muat history percakapan yang ada
-        const history = await Database.loadConversation(userId);
-
-        // 2. Mulai sesi chat dengan history sebelumnya
+        const history = await loadConversation(userId);
         const chat = aiModel.startChat({ history });
-
-        // 3. Kirim pesan baru dan dapatkan hasilnya
         const result = await chat.sendMessage(userMessage);
-        const response = await result.response;
-        const text = response.text();
-
-        // 4. Dapatkan history terbaru dari Gemini dan simpan
-        const updatedHistory = await chat.getHistory();
-        await Database.saveConversation(userId, updatedHistory);
-
-        await ctx.reply(`*🤖 Jawaban dari Gemini:*\n\n${text}`, { parse_mode: 'Markdown' });
-    } catch (error) {
-        console.error("Error with Gemini AI:", error);
-        ctx.reply("❌ Maaf, terjadi kesalahan saat berkomunikasi dengan AI.");
-    }
+        const text = result.response.text();
+        await saveConversation(userId, await chat.getHistory());
+        await ctx.reply(`*🤖 Gemini:* ${text}`, { parse_mode: 'Markdown' });
+    } catch (error) { ctx.reply("❌ Maaf, terjadi kesalahan pada fitur AI."); }
 });
 
-// /reset (PERINTAH BARU)
 bot.command("reset", async (ctx) => {
-    const userId = ctx.from.id.toString();
-    // Hapus file history percakapan
-    await Database.saveConversation(userId, []);
-    await ctx.reply("🔄 Memori percakapan AI telah berhasil dihapus. Kita mulai dari awal lagi!");
+    await saveConversation(ctx.from.id.toString(), []);
+    await ctx.reply("🔄 Memori percakapan AI telah direset.");
 });
 
-
-// --- Sisa kode lainnya tetap sama --- //
-
-// /random
-bot.command("random", async (ctx) => {
+bot.command('stalk', async (ctx) => {
+    const link = ctx.message.text.split(' ')[1];
+    if (!link || !link.startsWith('http')) return ctx.reply('❓ Penggunaan: `/stalk <link profil IG/TikTok/YouTube>`');
+    const waitingMessage = await ctx.reply('🕵️ Meneropong profil...');
     try {
-        await ctx.replyWithChatAction("upload_photo");
-        const category = getRandomItem(sfwCategories);
-        const res = await axios.get(`https://api.waifu.pics/sfw/${category}`);
-        const caption = `🎨 *Kategori: ${category}*\n\n💡 Tips: Anda bisa menyimpan gambar ini dengan perintah \`/pin ${res.data.url}\``;
-        await ctx.replyWithPhoto(res.data.url, { caption, parse_mode: 'Markdown' });
+        const { data } = await hitoriApi.get('/tools/stalk', { params: { url: link } });
+        const result = data.data;
+        const resultMessage = `*${result.icon} Hasil Teropong ${result.platform}*\n\n👤 *Username:* \`${result.username}\`\n👥 *Jumlah:* \`${result.followers}\`\n\n*Sumber:* [Lihat Profil](${link})`;
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+        await ctx.reply(resultMessage, { parse_mode: 'Markdown' });
     } catch (error) {
-        ctx.reply("❌ Gagal mengambil gambar random. Coba lagi nanti.");
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+        ctx.reply('❌ Gagal mengambil data. Mungkin profil private atau link salah.');
     }
 });
 
-// /nsfw
-bot.command("nsfw", async (ctx) => {
-    if (ctx.chat.type !== "private") {
-        return ctx.reply("🔞 Perintah ini hanya bisa digunakan di private chat.");
-    }
+
+bot.command('ghstalk', async (ctx) => {
+    const username = ctx.message.text.split(' ')[1];
+    if (!username) return ctx.reply('❓ Penggunaan: `/ghstalk <username github>`');
     try {
-        await ctx.replyWithChatAction("upload_photo");
-        const category = getRandomItem(nsfwCategories);
-        const res = await axios.get(`https://api.waifu.pics/nsfw/${category}`);
-        const caption = `🔞 *Kategori NSFW: ${category}*`;
-        await ctx.replyWithPhoto(res.data.url, { caption, parse_mode: 'Markdown' });
+        const { data } = await axios.get(`https://api.github.com/users/${username}`);
+        const caption = `*Profil GitHub: ${data.login}*\n\n*Nama:* ${data.name || 'N/A'}\n*Followers:* ${data.followers}\n*Following:* ${data.following}\n*Repo Publik:* ${data.public_repos}\n\n*Bio:* ${data.bio || 'N/A'}`;
+        await ctx.replyWithPhoto(data.avatar_url, { caption, parse_mode: 'Markdown' });
     } catch (error) {
-        ctx.reply("❌ Gagal mengambil gambar NSFW.");
+        ctx.reply('❌ Username tidak ditemukan.');
     }
 });
 
-// /search
-bot.command("search", async (ctx) => {
+bot.command('spotify', async (ctx) => {
     const query = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!query) return ctx.reply("❓ Penggunaan: `/search <nama anime>`\nContoh: `/search Attack on Titan`");
-
+    if (!query) return ctx.reply('❓ Penggunaan: `/spotify <judul lagu>`');
     try {
-        await ctx.replyWithChatAction("typing");
-        const res = await axios.get(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(query)}&limit=1`);
-        if (!res.data.data || res.data.data.length === 0) {
-            return ctx.reply(`❌ Anime "*${query}*" tidak ditemukan.`);
-        }
-        const anime = res.data.data[0];
-        const imageUrl = anime.images?.jpg?.large_image_url;
-        const synopsis = anime.synopsis ? anime.synopsis.substring(0, 400) + '...' : 'Tidak tersedia.';
-        const caption = `
-*📺 ${anime.title}* (${anime.year || 'N/A'})
-
-⭐ *Rating:* ${anime.score || 'N/A'}
-📊 *Status:* ${anime.status || 'N/A'}
-🎬 *Episode:* ${anime.episodes || 'N/A'}
-
-*📖 Sinopsis:*
-${synopsis}
-
-💡 Tips: Anda bisa menyimpan poster ini dengan perintah \`/pin ${imageUrl}\`
-        `;
-        if (imageUrl) {
-            await ctx.replyWithPhoto(imageUrl, { caption, parse_mode: 'Markdown' });
-        } else {
-            await ctx.reply(caption, { parse_mode: 'Markdown' });
-        }
+        const { data } = await hitoriApi.get('/search/spotify', { params: { query } });
+        const result = data.data[0];
+        const caption = `*🎶 Ditemukan di Spotify*\n\n*Judul:* ${result.title}\n*Artis:* ${result.artist}\n\n[Dengarkan di Spotify](${result.url})`;
+        await ctx.replyWithPhoto(result.thumbnail, { caption, parse_mode: 'Markdown' });
     } catch (error) {
-        ctx.reply("❌ Terjadi kesalahan saat mencari anime.");
+        ctx.reply('❌ Gagal mencari lagu di Spotify.');
     }
 });
 
-// /berita
-bot.command("berita", async (ctx) => {
+bot.command('urban', async (ctx) => {
+    const query = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!query) return ctx.reply('❓ Penggunaan: `/urban <kata gaul>`');
     try {
-        await ctx.replyWithChatAction("typing");
-        const res = await axios.get("https://api.spaceflightnewsapi.net/v4/articles/?limit=5");
-        const articles = res.data.results;
-        if (!articles || articles.length === 0) return ctx.reply("⚠️ Tidak ada berita yang bisa ditampilkan.");
-
-        let beritaMessage = "*📰 Berita Teknologi & Luar Angkasa Terbaru:*\n\n";
-        articles.forEach(article => {
-            beritaMessage += `*${article.title}*\n`;
-            beritaMessage += `*Sumber:* ${article.news_site}\n`;
-            beritaMessage += `[Baca selengkapnya](${article.url})\n\n`;
-        });
-        await ctx.reply(beritaMessage, { parse_mode: "Markdown", disable_web_page_preview: true });
+        const { data } = await axios.get(`https://api.urbandictionary.com/v0/define?term=${query}`);
+        if (!data.list.length) return ctx.reply('❌ Definisi tidak ditemukan.');
+        const result = data.list[0];
+        const message = `*Kata:* ${result.word}\n\n*Definisi:*\n${result.definition.replace(/[\[\]]/g, '')}\n\n*Contoh:*\n_${result.example.replace(/[\[\]]/g, '')}_`;
+        await ctx.reply(message, { parse_mode: 'Markdown' });
     } catch (error) {
-        ctx.reply("⚠️ Gagal mengambil berita. Coba lagi nanti.");
+        ctx.reply('❌ Gagal mencari definisi.');
     }
 });
 
-// /pin
-bot.command("pin", async (ctx) => {
-    const args = ctx.message.text.split(' ');
-    const imageUrl = args[1];
-    if (!imageUrl || !imageUrl.startsWith('http')) {
-        return ctx.reply("❓ Penggunaan: `/pin <link_gambar_valid>`");
-    }
+
+bot.command('tenor', async (ctx) => {
+    const query = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!query) return ctx.reply('❓ Penggunaan: `/tenor <kata kunci gif>`');
     try {
-        const userId = ctx.from.id.toString();
-        const animeName = args.slice(2).join(' ') || 'Gambar';
-        await Database.addPin(userId, imageUrl, animeName);
-        await ctx.reply("📌 Gambar berhasil disimpan ke koleksi Anda!");
+        const { data } = await hitoriApi.get('/search/tenor', { params: { query } });
+        const randomGif = data.data[Math.floor(Math.random() * data.data.length)];
+        await ctx.replyWithAnimation(randomGif.url);
     } catch (error) {
-        await ctx.reply("❌ Gagal menyimpan pin. Pastikan link valid.");
+        ctx.reply('❌ Gagal mencari GIF.');
     }
 });
 
-// /pins
-bot.command("pins", async (ctx) => {
+bot.command('npm', async (ctx) => {
+    const query = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!query) return ctx.reply('❓ Penggunaan: `/npm <nama paket>`');
     try {
-        const userId = ctx.from.id.toString();
-        const userPins = await Database.getUserPins(userId);
-        if (!userPins || userPins.length === 0) {
-            return ctx.reply("📭 Koleksi pin Anda masih kosong.\nGunakan `/pin <link_gambar>` untuk menyimpan.");
-        }
-        await ctx.reply(`*📌 Koleksi Pin Anda (${userPins.length} gambar):*`, { parse_mode: 'Markdown' });
-        for (const pin of userPins.slice(-5).reverse()) {
-            await ctx.replyWithPhoto(pin.imageUrl, {
-                caption: `*${pin.animeName}*\nDisimpan pada: ${new Date(pin.timestamp).toLocaleDateString('id-ID')}`,
-                parse_mode: 'Markdown'
-            });
-        }
+        const { data } = await axios.get(`https://registry.npmjs.org/-/v1/search?text=${query}&size=5`);
+        if (!data.objects.length) return ctx.reply('❌ Paket tidak ditemukan.');
+        const message = data.objects.map(({ package: pkg }) => `*${pkg.name}* (v${pkg.version})\n_${pkg.description}_\n[Lihat di NPM](${pkg.links.npm})`).join('\n\n');
+        await ctx.reply(message, { parse_mode: 'Markdown' });
     } catch (error) {
-        ctx.reply("❌ Gagal mengambil koleksi pin.");
+        ctx.reply('❌ Gagal mencari paket.');
     }
 });
 
-// Perintah Hiburan
-bot.command("meme", async (ctx) => {
+bot.command('ssweb', async (ctx) => {
+    const url = ctx.message.text.split(' ')[1];
+    if (!url || !url.startsWith('http')) return ctx.reply('❓ Penggunaan: `/ssweb <https://website.com>`');
+    const waitingMessage = await ctx.reply('📸 Mengambil screenshot...');
     try {
-        const res = await axios.get("https://meme-api.com/gimme");
-        ctx.replyWithPhoto(res.data.url, { caption: `*${res.data.title}*` , parse_mode: 'Markdown'});
-    } catch { ctx.reply("⚠️ Gagal ambil meme."); }
+        const response = await axios.get(`https://image.thum.io/get/width/1920/crop/1080/fullpage/${url}`, { responseType: 'arraybuffer' });
+        await ctx.replyWithDocument({ source: response.data, filename: 'screenshot.png' });
+        ctx.deleteMessage(waitingMessage.message_id).catch(() => {});
+    } catch (error) {
+        ctx.telegram.editMessageText(ctx.chat.id, waitingMessage.message_id, null, '❌ Gagal mengambil screenshot.').catch(() => {});
+    }
 });
-bot.command("jokes", (ctx) => ctx.reply(getRandomItem(["Kenapa programmer jomblo? Karena salah fokus, harusnya deketin orang, malah deketin bug.", "Apa bedanya modem sama korupsi? Sama-sama makan pulsa rakyat."])));
-bot.command("quotes", (ctx) => ctx.reply(getRandomItem(["Kunci kesuksesan adalah... duplikatnya.", "Jangan berhenti saat lelah, berhenti saat selesai."])));
 
-// Utilitas
 bot.command("cuaca", async (ctx) => {
     const city = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!city) return ctx.reply("❓ Contoh: `/cuaca Jakarta`");
+    if (!city) return ctx.reply("❓ Contoh penggunaan: `/cuaca Jakarta`");
     try {
-        const res = await axios.get(`https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${WEATHER_API_KEY}&units=metric&lang=id`);
-        const { name, main, weather } = res.data;
-        ctx.reply(`*🌤️ Cuaca di ${name}:*\n\n🌡️ Suhu: ${main.temp}°C\n${weather[0].description}`, { parse_mode: "Markdown" });
-    } catch {
-        ctx.reply("⚠️ Gagal mengambil data cuaca. Pastikan nama kota benar.");
+        await ctx.replyWithChatAction("typing");
+        const apiUrl = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&units=metric&appid=${WEATHER_API_KEY}&lang=id`;
+        const response = await axios.get(apiUrl);
+        const data = response.data;
+        const weatherInfo = `*🏙 Cuaca di Kota ${data.name}*\n\n*Cuaca:* ${data.weather[0].description}\n*Suhu:* ${data.main.temp}°C (terasa seperti ${data.main.feels_like}°C)\n*Kelembapan:* ${data.main.humidity}%\n*Angin:* ${data.wind.speed} m/s`;
+        await ctx.reply(weatherInfo, { parse_mode: 'Markdown' });
+    } catch (error) {
+        ctx.reply("❌ Gagal mengambil data cuaca. Cek kembali nama kota.");
     }
 });
 
-// Peluncuran Bot
+
+// --- ✍️ IMPLEMENTASI FITUR TEKS & KONTEN ✍️ --- //
+const sendRandomQuote = async (ctx, endpoint) => {
+    try {
+        const { data } = await hitoriApi.get(`/random/${endpoint}`);
+        ctx.reply(data.data.result);
+    } catch {
+        ctx.reply('❌ Gagal mengambil data.');
+    }
+};
+bot.command('quotes', (ctx) => sendRandomQuote(ctx, 'quotes'));
+bot.command('motivasi', (ctx) => sendRandomQuote(ctx, 'motivasi'));
+bot.command('bucin', (ctx) => sendRandomQuote(ctx, 'bucin'));
+
+bot.command('style', async (ctx) => {
+    const text = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!text) return ctx.reply('❓ Penggunaan: `/style <teks kamu>`');
+    try {
+        const { data } = await hitoriApi.get('/tools/styletext', { params: { text } });
+        const message = data.data.map(style => `*${style.name}:* \`${style.result}\``).join('\n\n');
+        ctx.reply(message, { parse_mode: 'Markdown' });
+    } catch {
+        ctx.reply('❌ Gagal membuat style text.');
+    }
+});
+
+bot.command('kopi', (ctx) => ctx.replyWithPhoto('https://coffee.alexflipnote.dev/random', { caption: '☕ Ngopi dulu, bray!' }));
+bot.command('meme', async (ctx) => {
+    try {
+        const { data } = await axios.get('https://meme-api.com/gimme');
+        await ctx.replyWithPhoto(data.url, { caption: `*${data.title}*`, parse_mode: 'Markdown' });
+    } catch {
+        ctx.reply('❌ Gagal mengambil meme.');
+    }
+});
+
+
+// --- 🚀 PELUNCURAN BOT & ERROR HANDLING 🚀 --- //
 bot.catch((err, ctx) => {
-  console.error(`Error untuk ${ctx.updateType}`, err);
-  ctx.reply("❌ Terjadi kesalahan internal. Mohon coba lagi nanti.").catch(e => console.error("Gagal mengirim pesan error:", e));
+    console.error(`Error untuk ${ctx.updateType}:`, err);
+    ctx.reply('❌ Terjadi kesalahan internal. Coba lagi nanti.').catch(e => console.error("Gagal mengirim pesan error:", e));
 });
 
 (async () => {
-  await Database.init();
-  bot.launch();
-  console.log("🚀 Bot Anime v3 (dengan memori) telah aktif!");
-  process.once("SIGINT", () => bot.stop("SIGINT"));
-  process.once("SIGTERM", () => bot.stop("SIGTERM"));
+    await initDatabase();
+    bot.launch();
+    console.log("🚀 Bot Legendaris v19.0.0 (FINAL BANGET) telah aktif!");
+    // Graceful shutdown
+    process.once("SIGINT", () => bot.stop("SIGINT"));
+    process.once("SIGTERM", () => bot.stop("SIGTERM"));
 })();
